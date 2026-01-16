@@ -6,98 +6,249 @@
   <title>Fabian Londen</title>
 
   <style>
-    html, body {
-      margin: 0;
-      height: 100%;
-      background: #000;
-      overflow: hidden;
-    }
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
 
-    #wrap {
-      height: 100%;
-      width: 100%;
-      overflow: auto;           /* scroll om PDF blir stor */
+    /* Toolbar (minimal) */
+    #bar {
+      position: fixed;
+      top: 10px; left: 10px; right: 10px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      z-index: 10;
+      pointer-events: none; /* låt knapparna slå igenom via egen pointer-events */
+    }
+    .btn, #page {
+      pointer-events: auto;
+      font: 14px/1 system-ui, -apple-system, Arial, sans-serif;
+      border: 1px solid rgba(255,255,255,.25);
+      background: rgba(20,20,20,.7);
+      color: #fff;
+      border-radius: 10px;
+      padding: 10px 12px;
+      user-select: none;
+    }
+    .btn { cursor: pointer; }
+    .btn:active { transform: translateY(1px); }
+    #page { opacity: .9; }
+
+    /* Viewport för pan/zoom */
+    #viewport {
+      position: absolute;
+      inset: 0;
+      overflow: auto;
       -webkit-overflow-scrolling: touch;
+      cursor: grab;          /* "vit hand" känsla */
       background: #000;
+    }
+    #viewport.dragging { cursor: grabbing; }
+
+    /* Centera canvas när den är mindre än viewport */
+    #stage {
+      min-width: 100%;
+      min-height: 100%;
       display: grid;
-      place-items: center;      /* centrerar canvas */
+      place-items: center;
+      padding: 40px; /* lite luft så man kan scrolla runt vid zoom */
+      box-sizing: border-box;
     }
 
-    canvas {
-      display: block;
-      background: transparent;
-      /* tar bort eventuella "ramar" */
-      outline: none;
+    canvas { display: block; }
+
+    /* lite hjälptext (valfritt) */
+    #hint {
+      position: fixed;
+      bottom: 10px; left: 10px;
+      color: rgba(255,255,255,.7);
+      font: 12px/1.3 system-ui, -apple-system, Arial, sans-serif;
+      background: rgba(20,20,20,.55);
+      border: 1px solid rgba(255,255,255,.15);
+      border-radius: 10px;
+      padding: 8px 10px;
     }
   </style>
 </head>
 <body>
-  <div id="wrap">
-    <canvas id="pdf"></canvas>
+
+  <div id="bar">
+    <div class="btn" id="zoomOut">−</div>
+    <div class="btn" id="zoomIn">+</div>
+    <div class="btn" id="fit">Fit</div>
+    <div class="btn" id="prev">←</div>
+    <div class="btn" id="next">→</div>
+    <div id="page">Sida: <span id="pageNum">1</span>/<span id="pageCount">?</span> • Zoom: <span id="zoomPct">100</span>%</div>
   </div>
 
-  <!-- PDF.js via CDN -->
+  <div id="viewport">
+    <div id="stage">
+      <canvas id="pdf"></canvas>
+    </div>
+  </div>
+
+  <div id="hint">Dra med musen för att panorera • Ctrl/⌘ + scroll = zoom</div>
+
   <script type="module">
     import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
-
-    // Viktigt: worker
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
 
-    // Byt filnamn om din PDF heter något annat:
+    // Byt om din PDF heter något annat
     const url = "./exempel.pdf";
 
     const canvas = document.getElementById("pdf");
     const ctx = canvas.getContext("2d", { alpha: false });
 
-    // Rendera sida 1 (ändra om du vill)
-    const pageNumber = 1;
+    const viewportEl = document.getElementById("viewport");
+    const pageNumEl = document.getElementById("pageNum");
+    const pageCountEl = document.getElementById("pageCount");
+    const zoomPctEl = document.getElementById("zoomPct");
 
-    // Auto-fit: anpassa PDF till fönstrets bredd
-    async function render() {
-      const loadingTask = pdfjsLib.getDocument(url);
-      const pdf = await loadingTask.promise;
-      const page = await pdf.getPage(pageNumber);
+    const zoomInBtn = document.getElementById("zoomIn");
+    const zoomOutBtn = document.getElementById("zoomOut");
+    const fitBtn = document.getElementById("fit");
+    const prevBtn = document.getElementById("prev");
+    const nextBtn = document.getElementById("next");
 
+    let pdfDoc = null;
+    let pageNumber = 1;
+    let scale = 1;
+    let baseFitScale = 1;
+
+    function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+    async function render(keepCenter = true) {
+      if (!pdfDoc) return;
+
+      // spara centerpunkt i scroll (så zoom känns "stabil")
+      let centerX = 0, centerY = 0, oldScrollW = 0, oldScrollH = 0;
+      if (keepCenter) {
+        oldScrollW = viewportEl.scrollWidth;
+        oldScrollH = viewportEl.scrollHeight;
+        centerX = viewportEl.scrollLeft + viewportEl.clientWidth / 2;
+        centerY = viewportEl.scrollTop + viewportEl.clientHeight / 2;
+      }
+
+      const page = await pdfDoc.getPage(pageNumber);
       const dpr = window.devicePixelRatio || 1;
 
-      // Först: viewport i skala 1 för att få originalbredd
-      const viewport1 = page.getViewport({ scale: 1 });
+      const vp = page.getViewport({ scale });
 
-      // Skala så att den passar i aktuell fönsterbredd (med lite marginal)
-      const maxWidth = Math.min(window.innerWidth, 1400); // cap om du vill
-      const scale = (maxWidth / viewport1.width);
+      canvas.width = Math.floor(vp.width * dpr);
+      canvas.height = Math.floor(vp.height * dpr);
+      canvas.style.width = Math.floor(vp.width) + "px";
+      canvas.style.height = Math.floor(vp.height) + "px";
 
-      const viewport = page.getViewport({ scale });
-
-      // Canvas i "device pixels" för skärpa
-      canvas.width = Math.floor(viewport.width * dpr);
-      canvas.height = Math.floor(viewport.height * dpr);
-
-      // Visad storlek i CSS-pixlar
-      canvas.style.width = Math.floor(viewport.width) + "px";
-      canvas.style.height = Math.floor(viewport.height) + "px";
-
-      // Skala kontext
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      await page.render({
-        canvasContext: ctx,
-        viewport,
-      }).promise;
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+      pageNumEl.textContent = String(pageNumber);
+      zoomPctEl.textContent = String(Math.round(scale * 100));
+
+      // återställ centerpunkt
+      if (keepCenter) {
+        const newScrollW = viewportEl.scrollWidth;
+        const newScrollH = viewportEl.scrollHeight;
+
+        const rx = oldScrollW ? (centerX / oldScrollW) : 0.5;
+        const ry = oldScrollH ? (centerY / oldScrollH) : 0.5;
+
+        viewportEl.scrollLeft = clamp(rx * newScrollW - viewportEl.clientWidth / 2, 0, newScrollW);
+        viewportEl.scrollTop  = clamp(ry * newScrollH - viewportEl.clientHeight / 2, 0, newScrollH);
+      }
     }
 
-    // Render vid start + vid resize
-    let resizeTimer;
-    window.addEventListener("resize", () => {
-      clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => render().catch(console.error), 150);
+    async function computeFitScale() {
+      const page = await pdfDoc.getPage(pageNumber);
+      const vp1 = page.getViewport({ scale: 1 });
+      const padding = 80; // matchar stage padding ungefär
+      const fitW = (viewportEl.clientWidth - padding) / vp1.width;
+      baseFitScale = clamp(fitW, 0.2, 4);
+      return baseFitScale;
+    }
+
+    async function fitToWidth() {
+      scale = await computeFitScale();
+      await render(false);
+      viewportEl.scrollLeft = 0;
+      viewportEl.scrollTop = 0;
+    }
+
+    // ==== Pan med "hand" (drag-to-scroll) ====
+    let isDown = false;
+    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+
+    viewportEl.addEventListener("mousedown", (e) => {
+      // ignorera om man klickar på toolbar
+      if (e.target.closest("#bar")) return;
+      isDown = true;
+      viewportEl.classList.add("dragging");
+      startX = e.clientX;
+      startY = e.clientY;
+      startLeft = viewportEl.scrollLeft;
+      startTop = viewportEl.scrollTop;
     });
 
-    render().catch((e) => {
-      document.body.innerHTML = "<p style='color:#fff;font-family:system-ui;padding:20px'>Kunde inte ladda PDF. Kontrollera att filen heter <b>exempel.pdf</b> och ligger i samma mapp som <b>index.html</b>.</p>";
-      console.error(e);
+    window.addEventListener("mousemove", (e) => {
+      if (!isDown) return;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      viewportEl.scrollLeft = startLeft - dx;
+      viewportEl.scrollTop = startTop - dy;
     });
+
+    window.addEventListener("mouseup", () => {
+      isDown = false;
+      viewportEl.classList.remove("dragging");
+    });
+
+    // ==== Zoom med Ctrl/⌘ + scroll ====
+    viewportEl.addEventListener("wheel", async (e) => {
+      const isZoom = e.ctrlKey || e.metaKey;
+      if (!isZoom) return; // normal scroll
+      e.preventDefault();
+
+      const factor = e.deltaY < 0 ? 1.1 : 0.9;
+      scale = clamp(scale * factor, 0.2, 6);
+      await render(true);
+    }, { passive: false });
+
+    // ==== Buttons ====
+    zoomInBtn.onclick = async () => { scale = clamp(scale * 1.15, 0.2, 6); await render(true); };
+    zoomOutBtn.onclick = async () => { scale = clamp(scale / 1.15, 0.2, 6); await render(true); };
+    fitBtn.onclick = async () => { await fitToWidth(); };
+
+    prevBtn.onclick = async () => {
+      if (!pdfDoc) return;
+      pageNumber = Math.max(1, pageNumber - 1);
+      await fitToWidth();
+    };
+
+    nextBtn.onclick = async () => {
+      if (!pdfDoc) return;
+      pageNumber = Math.min(pdfDoc.numPages, pageNumber + 1);
+      await fitToWidth();
+    };
+
+    window.addEventListener("resize", async () => {
+      if (!pdfDoc) return;
+      // behåll ungefärlig relativ zoom när fönstret ändras
+      const rel = scale / (baseFitScale || 1);
+      await computeFitScale();
+      scale = clamp(rel * baseFitScale, 0.2, 6);
+      await render(false);
+    });
+
+    // ==== Load ====
+    try {
+      pdfDoc = await pdfjsLib.getDocument(url).promise;
+      pageCountEl.textContent = String(pdfDoc.numPages);
+      await fitToWidth();
+    } catch (e) {
+      document.body.innerHTML =
+        "<p style='color:#fff;font-family:system-ui;padding:20px'>Kunde inte ladda PDF. Kontrollera att filen heter <b>exempel.pdf</b> och ligger i samma mapp som <b>index.html</b>.</p>";
+      console.error(e);
+    }
   </script>
 </body>
 </html>
