@@ -3,23 +3,62 @@
 <head>
   <meta charset="utf-8">
   <title>Fabian Londen</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
   <style>
-    body { font-family: system-ui; max-width: 900px; margin: 40px auto; }
-    iframe { width: 100%; height: 80vh; border: 1px solid #ccc; }
-    a { display: block; margin: 6px 0; }
+    body {
+      font-family: system-ui, -apple-system, Arial, sans-serif;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 0 16px;
+      line-height: 1.5;
+    }
+
+    h1 {
+      margin-bottom: 0.2em;
+    }
+
+    iframe {
+      width: 100%;
+      height: 80vh;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      margin-top: 12px;
+    }
+
+    ul {
+      padding-left: 18px;
+    }
+
+    a {
+      color: #0066cc;
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
+    }
   </style>
 </head>
 <body>
 
-<h1>Fabian Londen</h1>
+  <h1>Fabian Londen</h1>
+  <p>Välkommen till min sida.</p>
 
-<h2>PDF:er</h2>
-<ul>
-  <li><a href="files/exempel.pdf" target="_blank">Exempel PDF</a></li>
-</ul>
+  <h2>PDF:er</h2>
+  <ul>
+    <li>
+      <a href="exempel.pdf" target="_blank" rel="noopener">
+        Exempel PDF
+      </a>
+    </li>
+  </ul>
 
-<h2>Visning</h2>
-<iframe src="files/exempel.pdf"></iframe>
+  <h2>Visning</h2>
+  <iframe
+    src="exempel.pdf"
+    title="PDF-visning">
+  </iframe>
 
 </body>
 </html>
