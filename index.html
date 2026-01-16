@@ -1,32 +1,103 @@
 <!doctype html>
 <html lang="sv">
 <head>
-  <meta charset="utf-8">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Fabian Londen</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+
   <style>
     html, body {
       margin: 0;
-      padding: 0;
-      width: 100%;
       height: 100%;
-      overflow: hidden;
       background: #000;
+      overflow: hidden;
     }
-    iframe {
-      width: 100vw;
-      height: 100vh;
-      border: 0;
+
+    #wrap {
+      height: 100%;
+      width: 100%;
+      overflow: auto;           /* scroll om PDF blir stor */
+      -webkit-overflow-scrolling: touch;
+      background: #000;
+      display: grid;
+      place-items: center;      /* centrerar canvas */
+    }
+
+    canvas {
       display: block;
+      background: transparent;
+      /* tar bort eventuella "ramar" */
+      outline: none;
     }
   </style>
 </head>
 <body>
+  <div id="wrap">
+    <canvas id="pdf"></canvas>
+  </div>
 
-<iframe
-  src="exempel.pdf#toolbar=0&navpanes=0&scrollbar=0&view=FitH"
-  allowfullscreen>
-</iframe>
+  <!-- PDF.js via CDN -->
+  <script type="module">
+    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
 
+    // Viktigt: worker
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+
+    // Byt filnamn om din PDF heter något annat:
+    const url = "./exempel.pdf";
+
+    const canvas = document.getElementById("pdf");
+    const ctx = canvas.getContext("2d", { alpha: false });
+
+    // Rendera sida 1 (ändra om du vill)
+    const pageNumber = 1;
+
+    // Auto-fit: anpassa PDF till fönstrets bredd
+    async function render() {
+      const loadingTask = pdfjsLib.getDocument(url);
+      const pdf = await loadingTask.promise;
+      const page = await pdf.getPage(pageNumber);
+
+      const dpr = window.devicePixelRatio || 1;
+
+      // Först: viewport i skala 1 för att få originalbredd
+      const viewport1 = page.getViewport({ scale: 1 });
+
+      // Skala så att den passar i aktuell fönsterbredd (med lite marginal)
+      const maxWidth = Math.min(window.innerWidth, 1400); // cap om du vill
+      const scale = (maxWidth / viewport1.width);
+
+      const viewport = page.getViewport({ scale });
+
+      // Canvas i "device pixels" för skärpa
+      canvas.width = Math.floor(viewport.width * dpr);
+      canvas.height = Math.floor(viewport.height * dpr);
+
+      // Visad storlek i CSS-pixlar
+      canvas.style.width = Math.floor(viewport.width) + "px";
+      canvas.style.height = Math.floor(viewport.height) + "px";
+
+      // Skala kontext
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      await page.render({
+        canvasContext: ctx,
+        viewport,
+      }).promise;
+    }
+
+    // Render vid start + vid resize
+    let resizeTimer;
+    window.addEventListener("resize", () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => render().catch(console.error), 150);
+    });
+
+    render().catch((e) => {
+      document.body.innerHTML = "<p style='color:#fff;font-family:system-ui;padding:20px'>Kunde inte ladda PDF. Kontrollera att filen heter <b>exempel.pdf</b> och ligger i samma mapp som <b>index.html</b>.</p>";
+      console.error(e);
+    });
+  </script>
 </body>
 </html>
