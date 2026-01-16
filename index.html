@@ -73,6 +73,7 @@
       "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
 
     const url = "./exempel.pdf";
+
     const canvas = document.getElementById("pdf");
     const ctx = canvas.getContext("2d", { alpha: false });
 
@@ -92,11 +93,10 @@
     let scale = 1;
     let baseFitScale = 1;
 
-    // --- render control (fix blink/flip) ---
-    let renderToken = 0;           // "senaste" render
-    let renderInFlight = null;     // current renderTask
+    // Render control
+    let renderToken = 0;
+    let renderInFlight = null;
     let rafId = null;
-    let lastQueued = 0;
 
     function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
@@ -109,36 +109,72 @@
       return baseFitScale;
     }
 
-    function getCenterRatios() {
+    // ---- Zoom-to-cursor anchor ----
+    // Sparar senast kända musposition (i scroll-koordinater) inom viewport.
+    // När vi zoomar använder vi denna punkt som "ankare".
+    let lastMouse = null; // { xScroll, yScroll }
+    viewportEl.addEventListener("mousemove", (e) => {
+      const r = viewportEl.getBoundingClientRect();
+      const xInViewport = e.clientX - r.left;
+      const yInViewport = e.clientY - r.top;
+      lastMouse = {
+        xScroll: viewportEl.scrollLeft + xInViewport,
+        yScroll: viewportEl.scrollTop + yInViewport,
+      };
+    });
+
+    function getAnchorRatios(useMouse) {
       const oldW = viewportEl.scrollWidth || 1;
       const oldH = viewportEl.scrollHeight || 1;
+
+      if (useMouse && lastMouse) {
+        return { ax: lastMouse.xScroll / oldW, ay: lastMouse.yScroll / oldH, useMouse: true };
+      }
+
+      // fallback: center
       const cx = viewportEl.scrollLeft + viewportEl.clientWidth / 2;
       const cy = viewportEl.scrollTop + viewportEl.clientHeight / 2;
-      return { rx: cx / oldW, ry: cy / oldH };
+      return { ax: cx / oldW, ay: cy / oldH, useMouse: false };
     }
 
-    function restoreCenterRatios(rx, ry) {
+    function restoreAnchor(ax, ay, useMouse) {
       const newW = viewportEl.scrollWidth || 1;
       const newH = viewportEl.scrollHeight || 1;
-      viewportEl.scrollLeft = clamp(rx * newW - viewportEl.clientWidth / 2, 0, newW);
-      viewportEl.scrollTop  = clamp(ry * newH - viewportEl.clientHeight / 2, 0, newH);
+
+      // var ska ankaret ligga i viewporten efter zoom?
+      // Om vi zoomar med musen: håll ankaret på samma skärmpunkt (mouse pos).
+      // Annars: håll det i mitten.
+      let targetXInViewport = viewportEl.clientWidth / 2;
+      let targetYInViewport = viewportEl.clientHeight / 2;
+
+      if (useMouse && lastMouse) {
+        // mouse position i viewport (före zoom) ~ används som target
+        const r = viewportEl.getBoundingClientRect();
+        // lastMouse xScroll = scrollLeft + xInViewport => xInViewport = lastMouse - scrollLeft
+        targetXInViewport = clamp(lastMouse.xScroll - viewportEl.scrollLeft, 0, viewportEl.clientWidth);
+        targetYInViewport = clamp(lastMouse.yScroll - viewportEl.scrollTop, 0, viewportEl.clientHeight);
+      }
+
+      const targetScrollLeft = ax * newW - targetXInViewport;
+      const targetScrollTop  = ay * newH - targetYInViewport;
+
+      viewportEl.scrollLeft = clamp(targetScrollLeft, 0, newW);
+      viewportEl.scrollTop  = clamp(targetScrollTop, 0, newH);
     }
 
-    async function doRender(keepCenter) {
+    async function doRender(keepAnchor, anchorFromMouse) {
       const myToken = ++renderToken;
 
-      // cancel previous render immediately
       if (renderInFlight && renderInFlight.cancel) {
         try { renderInFlight.cancel(); } catch {}
       }
 
-      const { rx, ry } = keepCenter ? getCenterRatios() : { rx: 0.5, ry: 0.0 };
+      const { ax, ay, useMouse } = keepAnchor ? getAnchorRatios(anchorFromMouse) : { ax: 0.5, ay: 0, useMouse: false };
 
       const page = await pdfDoc.getPage(pageNumber);
       const dpr = window.devicePixelRatio || 1;
       const vp = page.getViewport({ scale });
 
-      // NOTE: setTransform first, then clear via fillRect to avoid black flash
       canvas.width = Math.floor(vp.width * dpr);
       canvas.height = Math.floor(vp.height * dpr);
       canvas.style.width = Math.floor(vp.width) + "px";
@@ -153,30 +189,24 @@
       try {
         await renderInFlight.promise;
       } catch (e) {
-        // cancellations are expected when zooming fast
         if (e?.name !== "RenderingCancelledException") console.error(e);
         return;
       }
 
-      // only apply UI updates if this is still the latest render
       if (myToken !== renderToken) return;
 
       pageNumEl.textContent = String(pageNumber);
       pageCountEl.textContent = String(pdfDoc.numPages);
       zoomPctEl.textContent = String(Math.round(scale * 100));
 
-      if (keepCenter) restoreCenterRatios(rx, ry);
+      if (keepAnchor) restoreAnchor(ax, ay, useMouse);
     }
 
-    function queueRender(keepCenter = true) {
-      // throttle to one per animation frame to prevent blinking
-      const now = performance.now();
-      lastQueued = now;
-
+    function queueRender(keepAnchor = true, anchorFromMouse = false) {
       if (rafId) cancelAnimationFrame(rafId);
       rafId = requestAnimationFrame(() => {
         rafId = null;
-        doRender(keepCenter);
+        doRender(keepAnchor, anchorFromMouse);
       });
     }
 
@@ -211,18 +241,21 @@
       viewportEl.classList.remove("dragging");
     });
 
-    // ==== Zoom: Ctrl/⌘ + scroll (throttled) ====
+    // ==== Zoom: Ctrl/⌘ + scroll (zooma mot muspekaren) ====
     viewportEl.addEventListener("wheel", (e) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       e.preventDefault();
+
       const factor = e.deltaY < 0 ? 1.12 : 0.89;
       scale = clamp(scale * factor, 0.2, 6);
-      queueRender(true);
+
+      // keepAnchor=true, anchorFromMouse=true
+      queueRender(true, true);
     }, { passive: false });
 
-    // ==== Buttons ====
-    zoomInBtn.onclick = () => { scale = clamp(scale * 1.15, 0.2, 6); queueRender(true); };
-    zoomOutBtn.onclick = () => { scale = clamp(scale / 1.15, 0.2, 6); queueRender(true); };
+    // ==== Buttons (zooma mot mitten) ====
+    zoomInBtn.onclick = () => { scale = clamp(scale * 1.15, 0.2, 6); queueRender(true, false); };
+    zoomOutBtn.onclick = () => { scale = clamp(scale / 1.15, 0.2, 6); queueRender(true, false); };
     fitBtn.onclick = () => { fitToWidth(); };
 
     prevBtn.onclick = async () => {
@@ -258,3 +291,4 @@
   </script>
 </body>
 </html>
+
