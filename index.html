@@ -6,19 +6,16 @@
   <title>Fabian Londen</title>
 
   <style>
-    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    html, body { margin: 0; height: 100%; background: #111; overflow: hidden; }
 
-    /* Toolbar (minimal) */
     #bar {
       position: fixed;
       top: 10px; left: 10px; right: 10px;
-      display: flex;
-      gap: 8px;
-      align-items: center;
+      display: flex; gap: 8px; align-items: center;
       z-index: 10;
-      pointer-events: none; /* låt knapparna slå igenom via egen pointer-events */
+      pointer-events: none;
     }
-    .btn, #page {
+    .btn, #status {
       pointer-events: auto;
       font: 14px/1 system-ui, -apple-system, Arial, sans-serif;
       border: 1px solid rgba(255,255,255,.25);
@@ -27,45 +24,30 @@
       border-radius: 10px;
       padding: 10px 12px;
       user-select: none;
+      white-space: nowrap;
     }
     .btn { cursor: pointer; }
     .btn:active { transform: translateY(1px); }
-    #page { opacity: .9; }
 
-    /* Viewport för pan/zoom */
     #viewport {
-      position: absolute;
-      inset: 0;
+      position: absolute; inset: 0;
       overflow: auto;
       -webkit-overflow-scrolling: touch;
-      cursor: grab;          /* "vit hand" känsla */
-      background: #000;
+      cursor: grab;
+      background: #111;
     }
     #viewport.dragging { cursor: grabbing; }
 
-    /* Centera canvas när den är mindre än viewport */
     #stage {
       min-width: 100%;
       min-height: 100%;
       display: grid;
       place-items: center;
-      padding: 40px; /* lite luft så man kan scrolla runt vid zoom */
+      padding: 40px;
       box-sizing: border-box;
     }
 
     canvas { display: block; }
-
-    /* lite hjälptext (valfritt) */
-    #hint {
-      position: fixed;
-      bottom: 10px; left: 10px;
-      color: rgba(255,255,255,.7);
-      font: 12px/1.3 system-ui, -apple-system, Arial, sans-serif;
-      background: rgba(20,20,20,.55);
-      border: 1px solid rgba(255,255,255,.15);
-      border-radius: 10px;
-      padding: 8px 10px;
-    }
   </style>
 </head>
 <body>
@@ -76,7 +58,7 @@
     <div class="btn" id="fit">Fit</div>
     <div class="btn" id="prev">←</div>
     <div class="btn" id="next">→</div>
-    <div id="page">Sida: <span id="pageNum">1</span>/<span id="pageCount">?</span> • Zoom: <span id="zoomPct">100</span>%</div>
+    <div id="status">Sida <span id="pageNum">1</span>/<span id="pageCount">?</span> • <span id="zoomPct">100</span>%</div>
   </div>
 
   <div id="viewport">
@@ -85,16 +67,12 @@
     </div>
   </div>
 
-  <div id="hint">Dra med musen för att panorera • Ctrl/⌘ + scroll = zoom</div>
-
   <script type="module">
     import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs";
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
 
-    // Byt om din PDF heter något annat
     const url = "./exempel.pdf";
-
     const canvas = document.getElementById("pdf");
     const ctx = canvas.getContext("2d", { alpha: false });
 
@@ -114,72 +92,105 @@
     let scale = 1;
     let baseFitScale = 1;
 
+    // --- render control (fix blink/flip) ---
+    let renderToken = 0;           // "senaste" render
+    let renderInFlight = null;     // current renderTask
+    let rafId = null;
+    let lastQueued = 0;
+
     function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
 
-    async function render(keepCenter = true) {
-      if (!pdfDoc) return;
+    async function computeFitScale() {
+      const page = await pdfDoc.getPage(pageNumber);
+      const vp1 = page.getViewport({ scale: 1 });
+      const padding = 80;
+      const fitW = (viewportEl.clientWidth - padding) / vp1.width;
+      baseFitScale = clamp(fitW, 0.2, 4);
+      return baseFitScale;
+    }
 
-      // spara centerpunkt i scroll (så zoom känns "stabil")
-      let centerX = 0, centerY = 0, oldScrollW = 0, oldScrollH = 0;
-      if (keepCenter) {
-        oldScrollW = viewportEl.scrollWidth;
-        oldScrollH = viewportEl.scrollHeight;
-        centerX = viewportEl.scrollLeft + viewportEl.clientWidth / 2;
-        centerY = viewportEl.scrollTop + viewportEl.clientHeight / 2;
+    function getCenterRatios() {
+      const oldW = viewportEl.scrollWidth || 1;
+      const oldH = viewportEl.scrollHeight || 1;
+      const cx = viewportEl.scrollLeft + viewportEl.clientWidth / 2;
+      const cy = viewportEl.scrollTop + viewportEl.clientHeight / 2;
+      return { rx: cx / oldW, ry: cy / oldH };
+    }
+
+    function restoreCenterRatios(rx, ry) {
+      const newW = viewportEl.scrollWidth || 1;
+      const newH = viewportEl.scrollHeight || 1;
+      viewportEl.scrollLeft = clamp(rx * newW - viewportEl.clientWidth / 2, 0, newW);
+      viewportEl.scrollTop  = clamp(ry * newH - viewportEl.clientHeight / 2, 0, newH);
+    }
+
+    async function doRender(keepCenter) {
+      const myToken = ++renderToken;
+
+      // cancel previous render immediately
+      if (renderInFlight && renderInFlight.cancel) {
+        try { renderInFlight.cancel(); } catch {}
       }
+
+      const { rx, ry } = keepCenter ? getCenterRatios() : { rx: 0.5, ry: 0.0 };
 
       const page = await pdfDoc.getPage(pageNumber);
       const dpr = window.devicePixelRatio || 1;
-
       const vp = page.getViewport({ scale });
 
+      // NOTE: setTransform first, then clear via fillRect to avoid black flash
       canvas.width = Math.floor(vp.width * dpr);
       canvas.height = Math.floor(vp.height * dpr);
       canvas.style.width = Math.floor(vp.width) + "px";
       canvas.style.height = Math.floor(vp.height) + "px";
 
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.fillStyle = "#111";
+      ctx.fillRect(0, 0, vp.width, vp.height);
 
-      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+      renderInFlight = page.render({ canvasContext: ctx, viewport: vp });
+
+      try {
+        await renderInFlight.promise;
+      } catch (e) {
+        // cancellations are expected when zooming fast
+        if (e?.name !== "RenderingCancelledException") console.error(e);
+        return;
+      }
+
+      // only apply UI updates if this is still the latest render
+      if (myToken !== renderToken) return;
 
       pageNumEl.textContent = String(pageNumber);
+      pageCountEl.textContent = String(pdfDoc.numPages);
       zoomPctEl.textContent = String(Math.round(scale * 100));
 
-      // återställ centerpunkt
-      if (keepCenter) {
-        const newScrollW = viewportEl.scrollWidth;
-        const newScrollH = viewportEl.scrollHeight;
-
-        const rx = oldScrollW ? (centerX / oldScrollW) : 0.5;
-        const ry = oldScrollH ? (centerY / oldScrollH) : 0.5;
-
-        viewportEl.scrollLeft = clamp(rx * newScrollW - viewportEl.clientWidth / 2, 0, newScrollW);
-        viewportEl.scrollTop  = clamp(ry * newScrollH - viewportEl.clientHeight / 2, 0, newScrollH);
-      }
+      if (keepCenter) restoreCenterRatios(rx, ry);
     }
 
-    async function computeFitScale() {
-      const page = await pdfDoc.getPage(pageNumber);
-      const vp1 = page.getViewport({ scale: 1 });
-      const padding = 80; // matchar stage padding ungefär
-      const fitW = (viewportEl.clientWidth - padding) / vp1.width;
-      baseFitScale = clamp(fitW, 0.2, 4);
-      return baseFitScale;
+    function queueRender(keepCenter = true) {
+      // throttle to one per animation frame to prevent blinking
+      const now = performance.now();
+      lastQueued = now;
+
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        doRender(keepCenter);
+      });
     }
 
     async function fitToWidth() {
       scale = await computeFitScale();
-      await render(false);
+      queueRender(false);
       viewportEl.scrollLeft = 0;
       viewportEl.scrollTop = 0;
     }
 
-    // ==== Pan med "hand" (drag-to-scroll) ====
-    let isDown = false;
-    let startX = 0, startY = 0, startLeft = 0, startTop = 0;
+    // ==== Pan (hand) ====
+    let isDown = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
 
     viewportEl.addEventListener("mousedown", (e) => {
-      // ignorera om man klickar på toolbar
       if (e.target.closest("#bar")) return;
       isDown = true;
       viewportEl.classList.add("dragging");
@@ -191,10 +202,8 @@
 
     window.addEventListener("mousemove", (e) => {
       if (!isDown) return;
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-      viewportEl.scrollLeft = startLeft - dx;
-      viewportEl.scrollTop = startTop - dy;
+      viewportEl.scrollLeft = startLeft - (e.clientX - startX);
+      viewportEl.scrollTop = startTop - (e.clientY - startY);
     });
 
     window.addEventListener("mouseup", () => {
@@ -202,21 +211,19 @@
       viewportEl.classList.remove("dragging");
     });
 
-    // ==== Zoom med Ctrl/⌘ + scroll ====
-    viewportEl.addEventListener("wheel", async (e) => {
-      const isZoom = e.ctrlKey || e.metaKey;
-      if (!isZoom) return; // normal scroll
+    // ==== Zoom: Ctrl/⌘ + scroll (throttled) ====
+    viewportEl.addEventListener("wheel", (e) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
       e.preventDefault();
-
-      const factor = e.deltaY < 0 ? 1.1 : 0.9;
+      const factor = e.deltaY < 0 ? 1.12 : 0.89;
       scale = clamp(scale * factor, 0.2, 6);
-      await render(true);
+      queueRender(true);
     }, { passive: false });
 
     // ==== Buttons ====
-    zoomInBtn.onclick = async () => { scale = clamp(scale * 1.15, 0.2, 6); await render(true); };
-    zoomOutBtn.onclick = async () => { scale = clamp(scale / 1.15, 0.2, 6); await render(true); };
-    fitBtn.onclick = async () => { await fitToWidth(); };
+    zoomInBtn.onclick = () => { scale = clamp(scale * 1.15, 0.2, 6); queueRender(true); };
+    zoomOutBtn.onclick = () => { scale = clamp(scale / 1.15, 0.2, 6); queueRender(true); };
+    fitBtn.onclick = () => { fitToWidth(); };
 
     prevBtn.onclick = async () => {
       if (!pdfDoc) return;
@@ -232,11 +239,10 @@
 
     window.addEventListener("resize", async () => {
       if (!pdfDoc) return;
-      // behåll ungefärlig relativ zoom när fönstret ändras
       const rel = scale / (baseFitScale || 1);
       await computeFitScale();
       scale = clamp(rel * baseFitScale, 0.2, 6);
-      await render(false);
+      queueRender(false);
     });
 
     // ==== Load ====
